@@ -1,0 +1,250 @@
+---
+title: "Project1"
+output: pdf_document
+date: "2023-02-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+bikeshare_2010 <- read.csv("2010-capitalbikeshare-tripdata.csv")
+bikeshare_2011 <- read.csv("2011-capitalbikeshare-tripdata.csv")
+bikeshare <- rbind(bikeshare_2010,bikeshare_2011)
+head(bikeshare)
+
+bikeshare$routes <- with(bikeshare,paste0(Start.station.number,"-",End.station.number))
+
+bikeshare$Start.date <- strptime(bikeshare$Start.date, format = "%Y-%m-%d %H:%M:%S")
+bikeshare$End.date <- strptime(bikeshare$End.date, format = "%Y-%m-%d %H:%M:%S")
+bikeshare$Start.date <- as.POSIXct(bikeshare$Start.date, format = "%Y-%m-%d %H:%M:%S")
+bikeshare$End.date <- as.POSIXct(bikeshare$End.date, format = "%Y-%m-%d %H:%M:%S")
+
+
+bikeshare$weekday <- weekdays(as.Date(bikeshare$Start.date))
+bikeshare$weekday <- ifelse(bikeshare$weekday %in% c("Firday","Saturday","Sunday"),0,1)
+
+
+
+drops <-c("End.date","Start.station.number","Start.station","End.station.number","End.station")
+
+df <- bikeshare[ , !(names(bikeshare) %in% drops)]
+
+df$Start.date <- as.numeric(df$Start.date- df$Start.date[1])
+
+
+head(df)
+count_routes <- df %>%group_by(routes)%>%summarise(n=n())
+count_routes[order(count_routes$n,decreasing = TRUE),]
+```
+
+```{r}
+example_route <- df[df$routes=="31201-31200",]
+```
+
+
+```{r}
+#Bike.number,
+
+
+set.seed(100)
+k <- 5
+fold <- sample(k, nrow(example_route), replace = TRUE)
+
+## For each span from 1 to 10 we can calculate the CV test error:
+mse <- numeric(k)
+span <- c(1:7/10)
+cv <- numeric(length(span))
+
+for (j in seq_along(span))
+{
+  for (i in seq_len(k))
+  {
+    take <- fold == i
+    foldi <- example_route[take, ]
+    foldOther <- example_route[!take, ]
+    f <- loess(Duration ~ Start.date, data=foldOther, span=span[j])
+    pred <- predict(f, foldi)
+    mse[i] <- mean((pred - foldi$Duration)^2, na.rm = TRUE)
+  }
+  cv[j]<- mean(mse)
+}
+
+min.span <- span[which.min(cv)]
+min.span
+```
+
+
+```{r}
+val.loess <- function(data){
+
+val <- sample(1:nrow(data), nrow(data)/2)
+
+## For each span from 1 to 10 we can calculate the CV test error:
+mse <- numeric(k)
+span <- c(1:9/10)
+val_mse <- numeric(length(span))
+
+for (j in seq_along(span))
+{
+  
+    
+    foldi <- data[val, ]
+    foldOther <- data[!take, ]
+    f <- loess(Duration ~ Start.date, data=foldOther, span=span[j])
+    pred <- predict(f, foldi)
+    mse <- mean((pred - foldi$Duration)^2, na.rm = TRUE)
+  
+  val_mse[j]<- mse
+}
+
+  min.span <- span[which.min(val_mse)]
+  min.span
+}
+
+```
+
+```{r}
+permutation_one_route <- function(route_number){
+  M <- 200
+  start.time <- Sys.time()
+  example_route <- df[df$routes==route_number,]
+
+  train_idx <- sample(1:nrow(example_route),nrow(example_route)/4)
+  example_route_train <- example_route[train_idx,]
+  example_route_test <- example_route[-train_idx,]
+  
+  min.span <- val.loess(example_route_train)
+  
+  test_statistics <- matrix(0,nrow = M)
+  X <- example_route_test$Start.date
+  Y <- example_route_test$Duration
+  lo <- loess(Y~X, degree = 2, span = min.span)
+
+  test_statistic  <- abs(cor(example_route$Duration,example_route$Start.date))
+  for (m in 1:M){
+    permute_eg <- example_route_test
+ 
+    idx_weekdays <- which(example_route_test$weekday==1)
+    idx_weekends <- which(example_route_test$weekday==0)
+    idx_member <- which(example_route_test$Member.type=="Member")
+    idx_casual <- which(example_route_test$Member.type=="Casual")
+    idx_group_1 <- intersect(idx_weekdays,idx_member)
+    idx_group_2 <- intersect(idx_weekdays,idx_casual)
+    idx_group_3 <- intersect(idx_weekends,idx_member)
+    idx_group_4 <- intersect(idx_weekends,idx_casual)
+ 
+    permute_eg$Duration[idx_group_1] <-  permute_eg$Duration[sample(idx_group_1)]
+    permute_eg$Duration[idx_group_2] <-  permute_eg$Duration[sample(idx_group_2)]
+    permute_eg$Duration[idx_group_3] <-  permute_eg$Duration[sample(idx_group_3)]
+    permute_eg$Duration[idx_group_4] <-  permute_eg$Duration[sample(idx_group_4)]
+    permute_eg$Start.date <- example_route_test$Start.date
+  
+  
+    X <- permute_eg$Start.date
+    Y <- permute_eg$Duration
+    lo1 <- loess(Y~X, degree = 2, span = min.span)
+    test_statistic_permute  <- -sum(lo1$residuals^2)
+    test_statistics[m] <- test_statistic_permute
+}
+p_value <- (1+ sum(test_statistics >=  test_statistic))/(1+M)
+
+
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+print(time.taken)
+return(p_value)
+}
+
+permutation_one_route("31012-31007")
+```
+
+
+
+```{r}
+count_routes <- df %>%
+  group_by(routes) %>%
+  summarise(count = n()) %>%
+  filter(count >= 200)
+```
+
+```{r}
+permutation_all_routes <- function(){
+  size = length(count_routes$routes)
+  p_values = matrix(0, size)
+  for (i in 1:size){
+    single_p_value = permutation_one_route(count_routes$routes[i])
+    p_values[i] = single_p_value
+  }
+  count_routes$p_values = p_values
+  return(count_routes)
+}
+```
+
+
+
+```{r}
+library(caret)
+set.seed(0)
+results = permutation_all_routes()
+results
+```
+
+
+
+```{r}
+
+BH <- function(P,alpha){
+  BH_thres <- (1:length(P))*alpha/length(P)
+  sorted_idx <- order(P)
+  cutoff <- max(which(P[sorted_idx]<BH_thres))
+  idx_rej <- sorted_idx[1:cutoff]
+  idx_rej
+}
+
+
+Storey_BH <- function(P,alpha,gamma){
+  pi_0_hat <- (sum(P>gamma))/(length(P)*(1-gamma))
+  Storey_thres <- (1:length(P))*alpha/(length(P)*pi_0_hat)
+  sorted_idx <- order(P)
+  cutoff <- max(which(P[sorted_idx]<Storey_thres))
+  idx_rej <- sorted_idx[1:cutoff]
+  idx_rej
+}
+```
+
+```{r}
+gamma <- 0.5
+alpha <- 0.1
+P <- as.vector(t(result))
+length(BH(P,alpha))
+length(Storey_BH(P,alpha,gamma))
+
+```
+
+
+```{r}
+selected_routes <- count_routes[idx_rej,]
+
+regression_one_route <- function(route_number){
+  example_route <- df[df$routes==route_number,]
+  model_lm <- lm(Duration~Start.date+weekday+Member.type+Bike.number,data = example_route)
+  coef <- coefficients(model_lm)
+  coef[2]
+}
+coefs <- numeric(nrow(selected_routes))
+for(i in 1:nrow(selected_routes)){
+  coefs[i]<- regression_one_route(selected_routes$routes[i])
+  
+  
+}
+
+
+```
+
+
+
+
+

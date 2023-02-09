@@ -1,0 +1,178 @@
+---
+title: "Project1_weather"
+output: pdf_document
+date: "2023-02-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+df <- read.csv("merged_data.csv")
+df <- na.omit(df)
+```
+
+```{r import, echo = FALSE}
+df
+```
+```{r datatrim}
+#add a route variable that indicates the start.station-end.station pair of the ride
+locs <- unique(df$Start.station.number)
+df$routes <- with(df, paste0(Start.station.number,"-",End.station.number))
+unique_routes <- unique(with(df,paste0(Start.station.number,"-",End.station.number)))
+
+#transform the time variable from chr to POSIXct
+df$Start.date <- strptime(df$Start.date, format = "%Y-%m-%d %H:%M:%S")
+df$Start.date <- as.POSIXct(df$Start.date, format = "%Y-%m-%d %H:%M:%S")
+
+#change weather descriptions to good, fair, and poor
+Good = c("sky is clear", "few clouds", "overcast clouds", "scattered clouds", "broken clouds")
+Fair = c("light intensity drizzle", "light snow", "light rain and snow", "fog", "light rain", "moderate rain")
+Poor = c("very heavy rain", "proximity squalls", "snow", "light intensity shower rain", "thunderstorm with heavy rain", "thunderstorm", "mist", "haze", "heavy intensity rain", "thunderstorm with rain", "thunderstorm with light rain", "heavy intensity shower rain", "rain and snow")
+
+df$weather_description[df$weather_description %in% Good] <- "Good"
+df$weather_description[df$weather_description %in% Fair] <- "Fair"
+df$weather_description[df$weather_description %in% Poor] <- "Poor"
+
+
+#drop irrelevant information
+drops <-c("End.date","Start.station.number","Start.station","End.station.number","End.station", "Bike.number", "time_of_day", "hours", "temp", "visibility", "dew_point", "pressure", "humidity", "wind_speed", "wind_deg")
+df <- df[ , !(names(df) %in% drops)]
+
+#we set the first date in the dataset as the starting point
+#measure how much time has elapsed since the first date (in seconds)
+df$Start.date <- as.numeric(df$Start.date- df$Start.date[1])
+```
+
+```{r write}
+write.csv(df, "trimmed_df_weather.csv", row.names=FALSE)
+```
+
+```{r countroute}
+#count the number of counts for each route and arrange from most to least
+count_routes <- df %>%
+  group_by(routes) %>%
+  summarise(count = n()) %>%
+  filter(count >= 200)
+
+count_routes <- count_routes[order(count_routes$count, decreasing = TRUE),]
+count_routes
+```
+
+```{r}
+val.loess <- function(data){
+
+val <- sample(1:nrow(data), nrow(data)/2)
+
+## For each span from 1 to 10 we can calculate the CV test error:
+mse <- numeric(k)
+span <- c(1:7/10)
+val_mse <- numeric(length(span))
+
+for (j in seq_along(span))
+{
+  
+    
+    foldi <- data[val, ]
+    foldOther <- data[!take, ]
+    f <- loess(Duration ~ Start.date, data=foldOther, span=span[j])
+    pred <- predict(f, foldi)
+    mse <- mean((pred - foldi$Duration)^2, na.rm = TRUE)
+  
+  val_mse[j]<- mse
+}
+
+  min.span <- span[which.min(val_mse)]
+  min.span
+}
+```
+
+
+```{r dsadj, warning=FALSE}
+permutation <- function(route_number){
+  Start <- Sys.time()
+  M <- 200
+  example_route <- df[df$routes==route_number,]
+  
+  #construct empty matrix for the permuted test statistic
+  test_statistics <- matrix(0,nrow = M)
+  
+  #calculate the test statistic before permutation
+  train_idx <- sample(1:nrow(example_route),nrow(example_route)/4)
+  example_route_train <- example_route[train_idx,]
+  example_route_test <- example_route[-train_idx,]
+  
+  min.span <- val.loess(example_route_train)
+  
+  test_statistics <- matrix(0,nrow = M)
+  X <- example_route_test$Start.date
+  Y <- example_route_test$Duration
+  lo <- loess(Y~X, degree = 2, span = min.span)
+  
+  for (m in 1:M){
+    permute_eg <- example_route_test
+  
+     for (day in c(0, 1)){
+      for (member in c("Member", "Casual")){
+        for (weather in c("Good", "Fair", "Poor")){
+          idx_weekdays <- which(example_route_test$weekday == day)
+          idx_member <- which(example_route_test$Member.type == member)
+          idx_weather <- which(example_route_test$weather_description == weather)
+          
+          idx_group <- intersect(idx_weekdays, intersect(idx_member, idx_weather))
+          #run permutations bind the permuted Duration with the Start.date, 
+          #so now Duration and Start.date are randomly shuffled
+         
+          if(length(idx_group>1)){
+          permute_eg$Duration[idx_group] <-  permute_eg$Duration[sample(idx_group)]}
+        }   
+      }
+    }
+    permute_eg$Start.date <- example_route_test$Start.date
+    #calculate the test statistic after permutation and save it to the matrix
+    X <- permute_eg_test$Start.date
+    Y <- permute_eg_test$Duration
+    lo1 <- loess(Y~X, degree = 2, span = 0.25)
+    test_statistic_permute  <- -sum(lo1$residuals^2)
+    test_statistics[m] <- test_statistic_permute
+    
+  }
+  #calculate p value
+  p_value <- (1+ sum(test_statistics >=  test_statistic))/(1+M)
+  
+  End <- Sys.time()
+  print(End-Start)
+  return(p_value)
+}
+
+
+
+```
+
+```{r,warning=FALSE}
+permutation("31101-31200")
+```
+
+```{r dsajkd}
+permutation_all_routes <- function(){
+  size = length(count_routes$routes)
+  p_values = matrix(0, size)
+  for (i in 1:size){
+    single_p_value = permutation(count_routes$routes[i])
+    p_values[i] = single_p_value
+  }
+  count_routes$p_values = p_values
+  return(count_routes)
+}
+```
+
+```{r saveresults, message = FALSE, warning=FALSE}
+results = permutation_all_routes()
+results
+write.csv(results, "p-values_loess_weather_gtr200.csv", row.names=FALSE)
+```
+
+```{r plotpvalues}
+hist(results$p_values)
+```
