@@ -1,0 +1,181 @@
+---
+title: "CPT_example"
+author: "Ruiting Tong"
+date: "2/6/2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+```
+
+## Load the datasets
+
+```{r}
+bikeShare = read.csv("trimmed_df_weather.csv")
+summary(bikeShare)
+bikeShare = bikeShare %>% filter(Member.type != "Unknown")
+```
+
+```{r}
+newFrame = bikeShare %>% 
+  group_by(Member.type, weekday, weather_description) %>%  
+  mutate(group_id = cur_group_id())
+newFrame[newFrame$group_id == 12,]
+```
+
+
+Group ID (our Zi):
+
+1-6 casual: 1-3 weekday = 0, 4-6 weekday = 1. Weather order: fair, good, poor
+7-12 member: same order as above 
+
+Model:
+
+$X | Z_i$ follows $\mathrm{Exp}(\lambda_i)$ distribution 
+
+```{r}
+# Algorithm 1 in Rina's paper
+# First fix a specific route.
+# We condition on membership + day in a week + weather,
+# which is a total of 12 combinations (called groups).
+
+# We first need to train the rate parameter of 
+# each X|Z_i = Exp(lambda_i)
+# For each group, randomly choose 20% of data to train parameters.
+# The rest of the data form the test set.
+
+trainTestSplit = function(route){
+  param = numeric(12)
+  chosen = list()
+  testData = data.frame()
+  theRoute = newFrame %>% filter(routes == route)
+
+  for(i in 1:12){
+    aGroup = theRoute[theRoute$group_id == i,]
+    n = nrow(aGroup)
+    chosen[[i]] = sample(n, floor(0.2*n), replace = F) 
+        
+    param[i] = 1/mean(aGroup$Duration[chosen[[i]]])
+
+    # This is to avoid some groups having too small samples.
+    if(length(chosen[[i]]) >= 1){
+      if(nrow(testData) == 0){
+        testData = aGroup[-chosen[[i]],]
+      }else{
+        testData = rbind(testData, aGroup[-chosen[[i]],])
+      }
+    }
+  }
+  return(list(param, testData))
+}
+
+```
+
+
+```{r}
+
+# The swap function swaps elements in a permutation 
+# specified by accept and pairs. 
+
+swap = function(permutation, accept, pairs){
+  n = length(accept)
+  for(i in 1:n){
+    if(accept[i] == 1){
+      ind1 = pairs[2*i - 1]
+      ind2 = pairs[2*i]
+      temp = permutation[ind1]
+      permutation[ind1] = permutation[ind2]
+      permutation[ind2] = temp
+    }
+  }
+  return(permutation)
+}
+
+
+
+# MCMC parallelized sampler prposed by the paper:
+
+parallSampler = function(grpID, dur, S){
+  size = length(dur)
+
+  # Indices = i,j in Algorithm 1
+  densityRatio = function(indices, perm){
+    lambda = param[grpID[indices]]
+    logDens = -lambda[1]*dur[perm[indices[2]]]-
+      lambda[2]*dur[perm[indices[1]]] + 
+      lambda[1]*dur[perm[indices[1]]] + 
+      lambda[2]*dur[perm[indices[2]]]
+    return(exp(logDens))
+  }
+  
+  allPers = matrix(numeric(S*size), nrow = S)
+  per = 1:size
+  allPers[1,] = per 
+  numPairs = floor(size/2)
+  oddsRatio = numeric(numPairs)
+
+  for(i in 1:(S-1)){
+    per = allPers[i,]
+    pairs = sample(size)[1:(2*numPairs)]
+    for(j in 1:numPairs){
+      oddsRatio[j] = densityRatio(pairs[(2*j-1):(2*j)],per)
+      # if(i == 1){print(oddsRatio[j])}
+    }
+    
+    probs = oddsRatio/(oddsRatio + 1)
+    B = rbinom(numPairs, size = 1, prob = probs)
+    
+    
+    allPers[i+1,] = swap(allPers[i,],B,pairs)
+  }
+  return(allPers)
+}
+
+```
+
+
+It takes a very long time to compute empirical p values using this method. We select the ten frequently used routes. 
+```{r}
+x = sort(table(newFrame$routes), decreasing = T)
+R = 100
+pvals = numeric(R)
+pvals2 = numeric(R)
+
+for(i in 1:R){
+  results = trainTestSplit(names(x)[i])
+  param = results[[1]]
+  testData = results[[2]]
+  test_stat = cor(testData$Duration, testData$Start.date)
+  
+  test_stats = numeric(100)
+  for(j in 1:100){
+    A = parallSampler(testData$group_id, testData$Duration, 51)
+    per = A[51,]
+    test_stats[j] = cor(testData$Duration[per], testData$Start.date)
+  }
+  pvals[i] = mean(test_stat > test_stats)
+}
+```
+
+```{r}
+jpeg()
+hist(pvals)
+```
+
+
+
+```{r}
+jpeg("first100.jpg", height = 480, width = 960)
+hist(pvals, main = "p-values of top 100 popular routes using CPT",
+     xlab = "p-values", ylab = "frequency")
+```
+
+
+
+
+
+
+
+
